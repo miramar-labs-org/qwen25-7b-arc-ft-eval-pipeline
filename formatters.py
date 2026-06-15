@@ -8,20 +8,21 @@
 # to prepare_dataset's packages_to_install if they are not already there.
 
 
-def format_example(example):
-    # TODO: replace with your dataset-specific formatter.
-    # `example` is a single row dict from the HuggingFace dataset.
-    instruction = example.get("question", "")
-    response = example.get("answer", "")
+def format_arc_challenge(example):
+    question = example.get("question", "")
+    texts = example["choices"]["text"]
+    labels = example["choices"]["label"]
+    choices = "\n".join(f"{labels[i]}. {texts[i]}" for i in range(len(texts)))
+    answer = str(example.get("answerKey", "A")).strip().upper()
     return {
-        "instruction": instruction,
-        "response": response,
-        "source": "example-dataset",
+        "instruction": f"{question}\n\nOptions:\n{choices}\n\nAnswer with the letter only.",
+        "response": answer,
+        "source": "arc-challenge",
     }
 
 
 # Map config.yaml dataset names → formatter functions.
 # Each key must match a `name:` entry in config.yaml datasets.
 FORMATTERS = {
-    "example-dataset": format_example,
+    "arc-challenge": format_arc_challenge,
 }

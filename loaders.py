@@ -6,5 +6,7 @@
 from datasets import load_dataset
 
 LOADERS = {
-    "example-dataset": lambda: [],  # TODO: replace with real loader
+    "arc-challenge": lambda: load_dataset("allenai/ai2_arc", "ARC-Challenge", split="train")
+        .map(format_arc_challenge)
+        .filter(lambda x: x["instruction"] != ""),
 }
