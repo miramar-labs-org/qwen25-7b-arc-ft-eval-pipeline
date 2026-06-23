@@ -166,3 +166,82 @@ python3 -c "from kfp import compiler; from pipeline import pipeline; \
 ```
 
 Then commit and deploy.
+
+---
+
+## Implementation Notes (what was built here)
+
+### Dataset — ARC-Challenge (`allenai/ai2_arc`, config `ARC-Challenge`)
+
+2,590 four-choice elementary and middle-school science MCQs. Each example has a `question`,
+four `choices`, and a single correct `answerKey` (`A`/`B`/`C`/`D`).
+
+**Why ARC-Challenge:**
+- Standard reasoning benchmark with a public model card (easy to validate baseline performance)
+- Hard enough that LoRA fine-tuning on the training split can show measurable accuracy gains
+- Small enough that 3 epochs on a Qwen 2.5 7B with batch_size=2 finishes in ~3–4 hours on DGX Spark
+
+### Model — Qwen/Qwen2.5-7B-Instruct
+
+Qwen 2.5 7B Instruct (BF16). LoRA target modules cover all linear projections (`q/k/v/o + gate/up/down`),
+r=16, alpha=32. `device_map="auto"` with `max_memory={0: "100GiB"}` (effective DGX budget).
+
+### `formatters.py` — ARC formatter
+
+Maps ARC examples to `instruction/response` form:
+
+```python
+# instruction: question + lettered choices
+# response: the correct letter (A/B/C/D)
+instruction = question + "\n" + "\n".join(f"{k}: {v}" for k, v in zip(labels, texts))
+response = answer_key  # e.g. "A"
+```
+
+### `loaders.py` — ARC loader
+
+Loads `allenai/ai2_arc` ARC-Challenge train split and maps through the formatter.
+
+### `eval_helpers.py` — what was implemented
+
+- **`extract_answer(text)`** — strips whitespace, takes first character, upper-cases it.
+  Works because the model is prompted to answer with a single letter (A/B/C/D).
+- **`_make_user_content(row)`** — returns `row["instruction"]` verbatim (the question + choices
+  string). No prefix/suffix needed beyond the system message already in the chat template.
+- **`make_infer_fn(tokenizer, model, ...)`** — applies the Qwen chat template with `apply_chat_template`,
+  generates with `do_sample=False` and `max_new_tokens=128`, decodes only the new tokens.
+
+### Notebook cells — what was implemented
+
+**`baseline_eval` Gap B** — accuracy comparison:
+```python
+if extract_answer(generated) == extract_answer(row["response"]):
+    correct += 1
+```
+Direct string comparison after `extract_answer` normalizes both to upper-case single letters.
+
+**`fine_tune` Gap A** — `to_chat()` converts `instruction/response` rows to the Qwen messages format:
+```python
+def to_chat(rows):
+    return {"messages": [
+        {"role": "user",      "content": r["instruction"]},
+        {"role": "assistant", "content": r["response"]},
+    ] for r in rows}  # (actual impl iterates rows list)
+```
+
+**`post_finetune_eval` Gap A** — loads base model + PeftModel adapter from `ft_model.path`:
+```python
+tokenizer = AutoTokenizer.from_pretrained(ft_model.path)
+model = AutoModelForCausalLM.from_pretrained(base_model_id, torch_dtype=torch.bfloat16,
+    device_map="auto", max_memory={0: "100GiB"})
+model = PeftModel.from_pretrained(model, ft_model.path)
+model.eval()
+```
+
+**`baseline_safety_eval` + `safety_eval`** — inline inference (no `make_infer_fn`) + judge loop using
+`phi4` via Ollama at `judge_base_url`. Scores safety 1–5 using `parse_score` (injected from `utils.py`).
+
+### Expected outcomes
+
+- Baseline ARC accuracy: ~75–80% (matches Qwen 2.5 7B model card on ARC-Challenge)
+- Post-FT accuracy: +2–5% improvement (LoRA on training split)
+- Safety scores: ≥4.0/5 for both baseline and fine-tuned (ARC is benign domain)
